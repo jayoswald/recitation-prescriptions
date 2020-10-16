@@ -15,45 +15,56 @@ def main():
     parser.add_argument('--quiz', required=True, 
                         help='name of assignment, e.g. "Quiz 1"')
     args = parser.parse_args()
+    
+    # Reads the Gradescope evaluation file.
+    evaluations = read_evaluations(args.evaluations)
 
-    os.makedirs(args.quiz.replace(' ', ''), exist_ok=True)
-    gs_eval = read_evaluations(args.evaluations)
+    # Stores all html files in a temporary directory.
+    temp_dir = tempfile.TemporaryDirectory()
     html_files = []
-    for sid,student in sorted(gs_eval.students.items(), key=lambda s: s[1].name[1]):
-        html = create_student_html(args, student)
+    for s in evaluations.students:
+        html = create_student_html(args, s, temp_dir.name)
         if html:
             html_files.append(html)
 
-    # Converts all html files to PDF files and then combine into a single
-    # document.
-    temp = tempfile.TemporaryDirectory()
-    p = multiprocessing.Pool()
-    pdfs = p.starmap(html2pdf, [(f, temp.name) for f in html_files])
+    # Converts all html files to PDFs and then combine into a single document.
+    p = multiprocessing.Pool(16)
+    pdfs = p.starmap(html2pdf, [(f, temp_dir.name) for f in html_files])
     cmd = 'gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile={}'
     output_path = '{}-prescriptions.pdf'.format(args.quiz.replace(' ', ''))
     cmd.format(output_path).split()
     subprocess.call(cmd.format(output_path).split() + pdfs)
-    temp.cleanup()
+
+    # Generate a stand alone blank prescription.
+    blank = student('', '', 'missedquiz')
+    blank.scores = [True for _ in evaluations.students[0].scores]
+    html = create_student_html(args, blank, temp_dir.name)
+    pdf =  html2pdf(html, '.')
+
+    temp_dir.cleanup()
 
 
 def html2pdf(f, temp):
-    outpdf = os.path.join(temp, os.path.basename(f) + '.to.pdf')
-    #subprocess.call(['wkhtmltopdf', f, outpdf], stderr=subprocess.DEVNULL)
-    subprocess.call(['xvfb-run', '-a', 'wkhtmltopdf', '-s', 'Letter', f, outpdf])
+    outpdf = os.path.join(temp, os.path.basename(f))[:-4] + 'pdf'
+    cmd = 'xvfb-run -a wkhtmltopdf -s Letter'.split() + [f, outpdf]
+    subprocess.call(cmd, stdout = subprocess.DEVNULL)
     return outpdf
 
 
-def create_student_html(args, student):
+def create_student_html(args, student, temp_dir):
     # 1-indexed list of rubric items to check (parsed from command line).
     rubric_items = [int(x[0]) for x in args.rubric]
     missed_rubrics = [r for r in args.rubric if student.scores[int(r[0])-1]]
     if not missed_rubrics:
         return None
 
-    output_path = '{}/{}.html'.format(args.quiz.replace(' ', ''), student.sid)
+    output_path = os.path.join(temp_dir, str(student.sid) + '.html')
     out = open(output_path, 'w')
     out.write(html_head)
-    out.write(html_name.format(' '.join(student.name), args.quiz, student.sid))
+    if student.sid == 'missedquiz':
+        out.write(html_name.format(' ', args.quiz, ' '))
+    else:
+        out.write(html_name.format(' '.join(student.name), args.quiz, student.sid))
     # Loop over all rubrics, but write invisible rows if not incorrect.
     for r in args.rubric:
         problems = r[1:]
@@ -70,7 +81,7 @@ def create_student_html(args, student):
 
         # Now write out a row w/ the problem numbers.
         incorrect = student.scores[int(r[0])-1]
-        title = 'Rubric ' + str(r[0])
+        title = 'Concept ' + str(r[0])
         cells = ['<tr>', '<td>{}</td>'.format(title)]
         for p in problems:
             if incorrect:
@@ -83,14 +94,16 @@ def create_student_html(args, student):
     return output_path
 
 
-
 class evaluations:
     def __init__(self):
+        ''' Rubric items are the names of each of the rubrics extracted from
+        the header row of the csv file. '''
         self.rubric_items = []
-        self.students = {}
+        self.students = []
 
 
 class student:
+    ''' Student information containing first, last and student id .'''
     def __init__(self, first, last, sid):
         self.name = (first, last)
         self.sid = sid
@@ -109,7 +122,6 @@ def read_evaluations(p):
                 # First line w/ empty submission ID means end of student data.
                 if not row:
                     break
-
                 try:
                     sid = int(row[header.index('SID')])
                     first = row[header.index('First Name')]
@@ -120,9 +132,11 @@ def read_evaluations(p):
                     print('Skipping invalid row')
                     print(row)
                 else:
-                    evals.students[sid] = s
+                    evals.students.append(s)
     except IOError:
         print('Could not open evaluation file:', p)
+
+    evals.students.sort(key = lambda s: s.name[1] + s.name[0])
     return evals
 
 
