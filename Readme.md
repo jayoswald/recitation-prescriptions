@@ -9,7 +9,7 @@
 > where OPTIONS include:
 >   --evaluations [evaluation csv file]
 >   --title [title of assignment]
->   --rubric [n] p1 p2 p3
+>   -c [n] p1 p2 p3
 
 Note that this should be all on the same line.
 

@@ -2,104 +2,50 @@
 import argparse
 import tempfile
 import os
+import re
 import csv
 import subprocess
 import multiprocessing
+import shutil
 
 def main():
     parser = argparse.ArgumentParser(description = 'todo.')
-    parser.add_argument('--rubric', nargs='+', action='append',
+    parser.add_argument('-c', nargs='+', action='append', dest='concepts',
                         help='rubric item numbers to use.')
     parser.add_argument('--evaluations', required=True,
                         help='path to Gradescope csv file')
     parser.add_argument('--quiz', required=True, 
                         help='name of assignment, e.g. "Quiz 1"')
+    parser.add_argument('--grades', default=None, 
+                        help='path to Gradescope grades')
     args = parser.parse_args()
-    
-    # Reads the Gradescope evaluation file.
-    evaluations = read_evaluations(args.evaluations)
 
-    # Stores all html files in a temporary directory.
-    temp_dir = tempfile.TemporaryDirectory()
-    html_files = []
-    for s in evaluations.students:
-        html = create_student_html(args, s, temp_dir.name)
-        if html:
-            html_files.append(html)
+    evaluations = assignment_evaluations(args.evaluations)
 
-    # Converts all html files to PDFs and then combine into a single document.
-    p = multiprocessing.Pool(16)
-    pdfs = p.starmap(html2pdf, [(f, temp_dir.name) for f in html_files])
-    cmd = 'gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile={}'
-    output_path = '{}-prescriptions.pdf'.format(args.quiz.replace(' ', ''))
-    cmd.format(output_path).split()
-    subprocess.call(cmd.format(output_path).split() + pdfs)
-
-    # Generate a stand alone blank prescription.
-    blank = student('', '', 'missedquiz')
-    blank.scores = [True for _ in evaluations.students[0].scores]
-    html = create_student_html(args, blank, temp_dir.name)
-    pdf =  html2pdf(html, '.')
-
-    temp_dir.cleanup()
-
-
-def html2pdf(f, temp):
-    outpdf = os.path.join(temp, os.path.basename(f))[:-4] + 'pdf'
-    cmd = 'xvfb-run -a wkhtmltopdf -s Letter'.split() + [f, outpdf]
-    subprocess.call(cmd, stdout = subprocess.DEVNULL)
-    return outpdf
-
-
-def create_student_html(args, student, temp_dir):
-    # 1-indexed list of rubric items to check (parsed from command line).
-    rubric_items = [int(x[0]) for x in args.rubric]
-    missed_rubrics = [r for r in args.rubric if student.scores[int(r[0])-1]]
-    if not missed_rubrics:
-        return None
-
-    output_path = os.path.join(temp_dir, str(student.sid) + '.html')
-    out = open(output_path, 'w')
-    out.write(html_head)
-    if student.sid == 'missedquiz':
-        out.write(html_name.format(' ', args.quiz, ' '))
+    if args.grades:
+        gradescope = gradescope_grades(args.grades)
+        output_path = '{}-results.pdf'.format(args.quiz.replace(' ', ''))
+        all_students = gradescope.all_student_ids()
     else:
-        out.write(html_name.format(' '.join(student.name), args.quiz, student.sid))
-    # Loop over all rubrics, but write invisible rows if not incorrect.
-    for r in args.rubric:
-        problems = r[1:]
-        ncols = 2*len(problems)-1
-        column_styles = ncols * '<col style="width:50px">'
+        gradescope = None
+        output_path = '{}-prescriptions.pdf'.format(args.quiz.replace(' ', ''))
+        all_students = evaluations.students.keys()
 
-        # First writes out a blank row.
-        cells = ['<tr>', '<td></td>']
-        for _ in problems:
-            cells += ['<td class="tg-invisible-box"></td>']
-            cells += ['<td></td>']
-        cells[-1] = '</tr>'
-        out.write(html_boxes.format(column_styles, ''.join(cells)))
-
-        # Now write out a row w/ the problem numbers.
-        incorrect = student.scores[int(r[0])-1]
-        title = 'Concept ' + str(r[0])
-        cells = ['<tr>', '<td>{}</td>'.format(title)]
-        for p in problems:
-            if incorrect:
-                cells.append('<td class="tg-box">{}</td>'.format(p))
-            else:
-                cells.append('<td class="tg-disabled-box">X</td>')
-            cells.append('<td></td>')
-        cells[-1] = '</tr>'
-        out.write(html_boxes.format(column_styles, ''.join(cells)))
-    return output_path
+    prescriptions = []
+    for sid in all_students:
+        name = gradescope.student_name(sid)
+        p = prescription(args.concepts, name, sid=sid, quiz_name=args.quiz)
+        if sid in evaluations.students:
+            p.set_required_concepts(evaluations.students[sid])
+        if gradescope:
+            p.update_from_gradescope(gradescope)
+        prescriptions.append(p)
 
 
-class evaluations:
-    def __init__(self):
-        ''' Rubric items are the names of each of the rubrics extracted from
-        the header row of the csv file. '''
-        self.rubric_items = []
-        self.students = []
+    name = args.quiz.replace(' ', '')
+    write_prescriptions('prescriptions-' + name, prescriptions)
+    prescriptions = [prescription(args.concepts, quiz_name = args.quiz)]
+    write_prescriptions('template-' + name, prescriptions)
 
 
 class student:
@@ -108,62 +54,160 @@ class student:
         self.name = (first, last)
         self.sid = sid
 
-def read_evaluations(p):
-    evals = evaluations()
-    try:
-        with open(p) as fid:
-            reader = csv.reader(fid)
+class assignment_evaluations:
+    ''' Class that reads the Gradescope assignment evaluation csv file. '''
+    def __init__(self, path):
+        try:
+            reader = csv.reader(open(path))
             header = next(reader)
-
-            i = header.index('Submission Time') + 1
-            j = header.index('Adjustment')
-            evals.rubric_items = header[i:j] 
-            for row in reader:
-                # First line w/ empty submission ID means end of student data.
-                if not row:
-                    break
-                try:
-                    sid = int(row[header.index('SID')])
-                    first = row[header.index('First Name')]
-                    last = row[header.index('Last Name')]
-                    s = student(first, last, sid)
-                    s.scores = [x.lower() == 'true' for x in row[i:j]]
-                except:
-                    print('Skipping invalid row')
-                    print(row)
-                else:
-                    evals.students.append(s)
-    except IOError:
-        print('Could not open evaluation file:', p)
-
-    evals.students.sort(key = lambda s: s.name[1] + s.name[0])
-    return evals
+        except IOError:
+            print('Could not open evaluation file:', p)
+        i, j = header.index('Submission Time') + 1, header.index('Adjustment')
+        self.rubric_names = header[i:j]
+        self.students = {}
+        for row in reader:
+            try:
+                s = student(row[header.index('First Name')],
+                            row[header.index('Last Name')],
+                            row[header.index('SID')])
+                s.missed_concepts = [x.lower() == 'true' for x in row[i:j]]
+                self.students[s.sid] = s
+            except:
+                if row and 'Rubric Type' not in row:
+                    print('Skipping invalid row\n', row)
 
 
-# https://html5-tutorial.net/try.html#pre0
-html_head = \
-'''<style type="text/css">
-@media print {@page {margin:0; } body {margin: 1.6cm; }}
-.tg  {border-collapse:collapse;border-spacing:0;}
-.tg td{font-family:Arial, sans-serif;font-size:14px;padding:0px;border-style:solid;border-width:0px;overflow:hidden;word-break:normal;border-color:black; height:25px}
-.tg .tg-box{text-align:left;vertical-align:bottom; height:100px; width:100px; border-width:2px; padding:5px}
-.tg .tg-invisible-box{text-align:left;vertical-align:bottom; height:100px; width:100px; border-width:0px; padding:5px}
-.tg .tg-disabled-box{text-align:left;vertical-align:bottom; background:#CCCCCC; font-size:80px; height:100px; width:100px; border-width:2px; padding:5px; text-align: center;}
-.tg .tg-name{text-align:left;vertical-align:middle; font-size:18px}
-.tg .tg-studentid{text-align:right;vertical-align:middle; font-size:18px}
-.tg .tg-title{text-align:center;vertical-align:middle; font-size:18px}
-</style>'''
+class gradescope_grades:
+    ''' Reads the master Gradescope grades. '''
+    def __init__(self, path):
+        try:
+            reader = csv.reader(open(path))
+            self.header = next(reader)
+        except IOError:
+            print('Could not open evaluation file:', p)
+        sid_column = self.header.index('SID')
+        self.data = {row[sid_column]:row for row in reader}
 
-html_name = '''<table class="tg" width=100%>
-<col style="width:33%">
-<col style="width:33%">
-<col style="width:34%"><tr>
- <td class="tg-name">{}</td>
- <td class="tg-title">{} prescription</td>
- <td class="tg-studentid">{}</td>
-</tr></table>'''
 
-html_boxes = '<table class="tg"><col style="width:40%">{}{}</table>'
+    def all_student_ids(self):
+        return self.data.keys()
+
+
+    def student_name(self, sid):
+        first = self.data[sid][self.header.index('First Name')]
+        last = self.data[sid][self.header.index('Last Name')]
+        return first + ' ' + last
+
+
+    def problem_grade(self, sid, quiz_name, problem_name):
+        name = 'Recitation {} [{}]'.format(
+            quiz_name.split()[-1], problem_name.upper())
+
+        if name in self.header:
+            score = self.data[sid][self.header.index(name)]
+            if not score:
+                return 'S'
+            elif float(score) == 0.0:
+                return 'N'
+            elif float(score) > 0.0:
+                return 'Y'
+            else:
+                return '?'
+        else:
+            print('Warning, recitation problem', problem_name,
+                   'not found for', quiz_name)
+            return None
+            
+
+class prescription:
+    def __init__(self, concepts, name = '', sid = '', quiz_name = ''):
+        self.quiz_name = quiz_name
+        self.student_name = name
+        self.student_id = sid
+        self.concepts = [prescription.concept(c[1:]) for c in concepts]
+
+    def set_required_concepts(self, evaluation):
+        for c, s in zip(self.concepts, evaluation.missed_concepts):
+            if not s:
+                for p in c.problems:
+                    p.status = 'X'
+
+    def update_from_gradescope(self, gradescope):
+        for c in self.concepts:
+            for p in c.problems:
+                if not p.status == 'X':
+                    p.status = gradescope.problem_grade(
+                        self.student_id, self.quiz_name, p.name)
+
+    class concept:
+        def __init__(self, problems):
+            self.problems = [prescription.problem(p) for p in problems]
+
+    class problem:
+        def __init__(self, name):
+            self.name = name
+            self.status = ''
+
+
+def write_prescriptions(basename, prescriptions):
+    cwd = os.getcwd()
+    tmp = tempfile.TemporaryDirectory()
+    os.chdir(tmp.name)
+
+    fid = open(basename + '.tex', 'w')
+    fid.write(header)
+
+    for s in prescriptions:
+        fid.write('\\newpage\n\\noindent')
+
+        name, sid = s.student_name, s.student_id
+        if name == '' and sid == '':
+            name, sid = r'\quad', r'\quad'
+
+        fid.write(page_header.format(name, s.quiz_name + ' prescriptions', sid))
+        for i,c in enumerate(s.concepts):
+            fid.write(concept_label.format(i+1))
+            for p in c.problems:
+                fid.write(box.format(p.name, p.status))
+            fid.write(r'\\[0.5in]')
+    fid.write('\end{document}')
+    fid.flush()
+
+    subprocess.call(['pdflatex', '-halt-on-error', basename], stdout=subprocess.DEVNULL)
+    shutil.move(basename + '.pdf', os.path.join(cwd, basename + '.pdf'))
+    os.chdir(cwd)
+
+
+header = r'''\documentclass[12pt]{article}
+\usepackage[letterpaper, margin=1in]{geometry}
+\usepackage{tikz}
+\usepackage{times}
+\pagestyle{empty}
+\newcommand\HUGE{\@setfontsize\Huge{38}{47}} 
+\begin{document}'''
+
+page_header = r'''
+\begin{{minipage}}{{0.3\linewidth}}{}\end{{minipage}}
+\begin{{minipage}}{{0.3\linewidth}}\centering {}\end{{minipage}}
+\begin{{minipage}}{{0.3\linewidth}}
+  \begin{{flushright}}{}\end{{flushright}}
+\end{{minipage}}
+\\[10mm]'''
+
+concept_label = r'''
+\begin{{tikzpicture}}
+  \node[minimum width=0.75in, minimum height=1in] 
+    {{ \textbf{{Concept {}}} }};
+\end{{tikzpicture}}'''
+
+box = r'''
+\hspace{{0.5in}}\begin{{tikzpicture}}
+  \node[draw=none, fill=cyan!30, align=left, 
+        anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
+  \node[draw, minimum width=1in, minimum height=1in, very thick] 
+        {{\Huge{{{1}}}}};
+\end{{tikzpicture}}'''
+
 
 if __name__ == '__main__':
     main()
