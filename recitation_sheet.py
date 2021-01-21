@@ -16,10 +16,9 @@ def main():
                         help='path to Gradescope csv file')
     parser.add_argument('--quiz', required=True, 
                         help='name of assignment, e.g. "Quiz 1"')
-    parser.add_argument('--grades', default=None, 
+    parser.add_argument('--grades', required=True,
                         help='path to Gradescope grades')
     args = parser.parse_args()
-
     evaluations = assignment_evaluations(args.evaluations)
 
     if args.grades:
@@ -100,23 +99,25 @@ class gradescope_grades:
 
 
     def problem_grade(self, sid, quiz_name, problem_name):
-        name = 'Recitation {} [{}]'.format(
-            quiz_name.split()[-1], problem_name.upper())
 
-        if name in self.header:
-            score = self.data[sid][self.header.index(name)]
-            if not score:
-                return 'S'
-            elif float(score) == 0.0:
-                return 'N'
-            elif float(score) > 0.0:
-                return 'Y'
-            else:
-                return '?'
-        else:
-            print('Warning, recitation problem', problem_name,
-                   'not found for', quiz_name)
-            return None
+        ptn = '^[Rr]ecitation (\d+) \[.*?(\d+)\]$'
+        q_num = int(quiz_name.split()[-1])
+        p_num = int(problem_name[1:])
+        for idx, h in enumerate(self.header):
+            m = re.match(ptn, h)
+            if m and int(m.group(1)) == q_num and int(m.group(2)) == p_num:
+                score = self.data[sid][idx]
+                if not score:
+                    return 'S'
+                elif float(score) == 0.0:
+                    return 'N'
+                elif float(score) > 0.0:
+                    return 'Y'
+                else:
+                    return '?'
+        print('Warning, recitation problem', problem_name,
+               'not found for', quiz_name)
+        return ''
             
 
 class prescription:
@@ -168,7 +169,10 @@ def write_prescriptions(basename, prescriptions):
         for i,c in enumerate(s.concepts):
             fid.write(concept_label.format(i+1))
             for p in c.problems:
-                fid.write(box.format(p.name, p.status))
+                if p.status == 'X':
+                    fid.write(shaded_box.format(p.name, p.status))
+                else:
+                    fid.write(box.format(p.name, p.status))
             fid.write(r'\\[0.5in]')
     fid.write('\end{document}')
     fid.flush()
@@ -202,10 +206,20 @@ concept_label = r'''
 
 box = r'''
 \hspace{{0.5in}}\begin{{tikzpicture}}
-  \node[draw=none, fill=cyan!30, align=left, 
+  \node[draw=none, fill=green!30, align=left, 
         anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
   \node[draw, minimum width=1in, minimum height=1in, very thick] 
         {{\Huge{{{1}}}}};
+\end{{tikzpicture}}'''
+
+shaded_box = r'''
+\hspace{{0.5in}}\begin{{tikzpicture}}
+  \node[draw, minimum width=1in, minimum height=1in, very thick, fill=black!20] 
+        {{\Huge{{{1}}}}};
+  \node[draw=none, fill=red!30, align=left, 
+        anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
+  \node[draw, minimum width=1in, minimum height=1in, very thick,
+        anchor=center] at (0, 0) {{}};
 \end{{tikzpicture}}'''
 
 
