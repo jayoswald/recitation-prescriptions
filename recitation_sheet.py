@@ -61,19 +61,23 @@ class assignment_evaluations:
             header = next(reader)
         except IOError:
             print('Could not open evaluation file:', p)
+        ''' Concept rubric titles must begin with 'concept ' (case insensitive). '''
+        concept_indices = [i for i,h in enumerate(header) 
+                                if h.lower().startswith('concept ')]
         i, j = header.index('Submission Time') + 1, header.index('Adjustment')
         self.rubric_names = header[i:j]
         self.students = {}
         for row in reader:
+            if not row or row[0] in 'Point Values Rubric Numbers Rubric Type':
+                continue
             try:
                 s = student(row[header.index('First Name')],
                             row[header.index('Last Name')],
                             row[header.index('SID')])
-                s.missed_concepts = [x.lower() == 'true' for x in row[i:j]]
+                s.missed_concepts = [row[i].lower() == 'true' for i in concept_indices]
                 self.students[s.sid] = s
             except:
-                if row and 'Rubric Type' not in row:
-                    print('Skipping invalid row\n', row)
+                print('Skipping invalid row\n', row)
 
 
 class gradescope_grades:
@@ -157,7 +161,6 @@ def write_prescriptions(basename, prescriptions):
 
     fid = open(basename + '.tex', 'w')
     fid.write(header)
-
     for s in prescriptions:
         fid.write('\\newpage\n\\noindent')
 
