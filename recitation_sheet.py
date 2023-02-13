@@ -2,49 +2,36 @@
 import argparse
 import tempfile
 import os
-import re
 import csv
 import subprocess
-import multiprocessing
-import shutil
+
 
 def main():
-    parser = argparse.ArgumentParser(description = 'todo.')
+    parser = argparse.ArgumentParser()
     parser.add_argument('-c', nargs='+', action='append', dest='concepts',
                         help='rubric item numbers to use.')
     parser.add_argument('--evaluations', required=True,
-                        help='path to Gradescope csv file')
+                        help='Gradescope quiz evaluations csv file')
     parser.add_argument('--quiz', required=True, 
                         help='name of assignment, e.g. "Quiz 1"')
-    parser.add_argument('--grades', required=True,
-                        help='path to Gradescope grades')
     args = parser.parse_args()
-    evaluations = assignment_evaluations(args.evaluations)
+    build_prescriptions(args.evaluations, args.concepts, args.quiz)
 
-    if args.grades:
-        gradescope = gradescope_grades(args.grades)
-        output_path = '{}-results.pdf'.format(args.quiz.replace(' ', ''))
-        all_students = gradescope.all_student_ids()
-    else:
-        gradescope = None
-        output_path = '{}-prescriptions.pdf'.format(args.quiz.replace(' ', ''))
-        all_students = evaluations.students.keys()
 
+def build_prescriptions(evaluation_path, concepts, quiz_name):
+    evaluations = assignment_evaluations(evaluation_path)
+    all_students = evaluations.students.keys()
     prescriptions = []
-    for sid in all_students:
-        name = gradescope.student_name(sid)
-        p = prescription(args.concepts, name, sid=sid, quiz_name=args.quiz)
+    for sid, student in evaluations.students.items():
+        p = prescription(concepts, quiz_name, student.full_name(), sid)
         if sid in evaluations.students:
             p.set_required_concepts(evaluations.students[sid])
-        if gradescope:
-            p.update_from_gradescope(gradescope)
         prescriptions.append(p)
-
-
-    name = args.quiz.replace(' ', '')
-    write_prescriptions('prescriptions-' + name, prescriptions)
-    prescriptions = [prescription(args.concepts, quiz_name = args.quiz)]
-    write_prescriptions('template-' + name, prescriptions)
+    short_name = quiz_name.replace(' ', '')
+    write_prescriptions('prescriptions-' + short_name, prescriptions)
+    # Writes a blank prescription for the Gradescope template.
+    prescriptions = [prescription(concepts, quiz_name)]
+    write_prescriptions('template-' + short_name, prescriptions)
 
 
 class student:
@@ -52,21 +39,31 @@ class student:
     def __init__(self, first, last, sid):
         self.name = (first, last)
         self.sid = sid
+        self.missed_concepts = []
+
+    def full_name(self):
+        ''' Returns student full name as "First Last" '''
+        return f'{self.name[0]} {self.name[1]}'
+
 
 class assignment_evaluations:
-    ''' Class that reads the Gradescope assignment evaluation csv file. '''
+    ''' Class that reads Gradescope assignment evaluation csv file. '''
     def __init__(self, path):
+        self.students = {}
+        self.read_csv(path)
+
+    def read_csv(self, path):
+        ''' Reads student grades from Gradescope CSV file for the quiz evaluation. '''
         try:
             reader = csv.reader(open(path))
-            header = next(reader)
         except IOError:
-            print('Could not open evaluation file:', p)
-        ''' Concept rubric titles must begin with 'concept ' (case insensitive). '''
-        concept_indices = [i for i,h in enumerate(header) 
-                                if h.lower().startswith('concept ')]
-        i, j = header.index('Submission Time') + 1, header.index('Adjustment')
-        self.rubric_names = header[i:j]
-        self.students = {}
+            print(f'Could not open evaluation file: {path}')
+            return None
+        header = next(reader)
+        # Concept rubric titles must begin with 'concept ' (case insensitive).
+        concept_indices = [i for i,h in enumerate(header) if h.lower().startswith('concept ')]
+        i = header.index('Submission Time') + 1
+        j = header.index('Adjustment')
         for row in reader:
             if not row or row[0] in 'Point Values Rubric Numbers Rubric Type':
                 continue
@@ -80,52 +77,8 @@ class assignment_evaluations:
                 print('Skipping invalid row\n', row)
 
 
-class gradescope_grades:
-    ''' Reads the master Gradescope grades. '''
-    def __init__(self, path):
-        try:
-            reader = csv.reader(open(path))
-            self.header = next(reader)
-        except IOError:
-            print('Could not open evaluation file:', p)
-        sid_column = self.header.index('SID')
-        self.data = {row[sid_column]:row for row in reader}
-
-
-    def all_student_ids(self):
-        return self.data.keys()
-
-
-    def student_name(self, sid):
-        first = self.data[sid][self.header.index('First Name')]
-        last = self.data[sid][self.header.index('Last Name')]
-        return first + ' ' + last
-
-
-    def problem_grade(self, sid, quiz_name, problem_name):
-
-        ptn = '^[Rr]ecitation (\d+) \[.*?(\d+)\]$'
-        q_num = int(quiz_name.split()[-1])
-        p_num = int(problem_name[1:])
-        for idx, h in enumerate(self.header):
-            m = re.match(ptn, h)
-            if m and int(m.group(1)) == q_num and int(m.group(2)) == p_num:
-                score = self.data[sid][idx]
-                if not score:
-                    return 'S'
-                elif float(score) == 0.0:
-                    return 'N'
-                elif float(score) > 0.0:
-                    return 'Y'
-                else:
-                    return '?'
-        print('Warning, recitation problem', problem_name,
-               'not found for', quiz_name)
-        return ''
-            
-
 class prescription:
-    def __init__(self, concepts, name = '', sid = '', quiz_name = ''):
+    def __init__(self, concepts, quiz_name, name='', sid=''):
         self.quiz_name = quiz_name
         self.student_name = name
         self.student_id = sid
@@ -136,13 +89,6 @@ class prescription:
             if not s:
                 for p in c.problems:
                     p.status = 'X'
-
-    def update_from_gradescope(self, gradescope):
-        for c in self.concepts:
-            for p in c.problems:
-                if not p.status == 'X':
-                    p.status = gradescope.problem_grade(
-                        self.student_id, self.quiz_name, p.name)
 
     class concept:
         def __init__(self, problems):
@@ -155,15 +101,15 @@ class prescription:
 
 
 def write_prescriptions(basename, prescriptions):
+    ''' Generates a PDF file where each page is the prescription for 
+    a student. '''
     cwd = os.getcwd()
     tmp = tempfile.TemporaryDirectory()
     os.chdir(tmp.name)
-
     fid = open(basename + '.tex', 'w')
     fid.write(header)
     for s in prescriptions:
         fid.write('\\newpage\n\\noindent')
-
         name, sid = s.student_name, s.student_id
         if name == '' and sid == '':
             name, sid = r'\quad', r'\quad'
@@ -179,9 +125,8 @@ def write_prescriptions(basename, prescriptions):
             fid.write(r'\\[0.5in]')
     fid.write('\end{document}')
     fid.flush()
-
     subprocess.call(['pdflatex', '-halt-on-error', basename], stdout=subprocess.DEVNULL)
-    shutil.move(basename + '.pdf', os.path.join(cwd, basename + '.pdf'))
+    os.replace(basename + '.pdf', os.path.join(cwd, basename + '.pdf'))
     os.chdir(cwd)
 
 
@@ -197,34 +142,32 @@ page_header = r'''
 \begin{{minipage}}{{0.3\linewidth}}{}\end{{minipage}}
 \begin{{minipage}}{{0.3\linewidth}}\centering {}\end{{minipage}}
 \begin{{minipage}}{{0.3\linewidth}}
-  \begin{{flushright}}{}\end{{flushright}}
-\end{{minipage}}
-\\[10mm]'''
+\begin{{flushright}}{}\end{{flushright}}
+\end{{minipage}} \\[10mm]'''
 
 concept_label = r'''
-\begin{{tikzpicture}}
-  \node[minimum width=0.75in, minimum height=1in] 
-    {{ \textbf{{Concept {}}} }};
+\begin{{tikzpicture}} \node[minimum width=0.75in, minimum height=1in] 
+{{ \textbf{{Concept {}}} }};
 \end{{tikzpicture}}'''
 
 box = r'''
 \hspace{{0.5in}}\begin{{tikzpicture}}
-  \node[draw=none, fill=green!30, align=left, 
-        anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
-  \node[draw, minimum width=1in, minimum height=1in, very thick] 
-        {{\Huge{{{1}}}}};
+\node[draw=none, fill=green!30, align=left, 
+anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
+\node[draw, minimum width=1in, minimum height=1in, very thick] 
+{{\Huge{{{1}}}}};
 \end{{tikzpicture}}'''
 
 shaded_box = r'''
 \hspace{{0.5in}}\begin{{tikzpicture}}
-  \node[draw, minimum width=1in, minimum height=1in, very thick, fill=black!20] 
-        {{\Huge{{{1}}}}};
-  \node[draw=none, fill=red!30, align=left, 
-        anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
-  \node[draw, minimum width=1in, minimum height=1in, very thick,
-        anchor=center] at (0, 0) {{}};
+\node[draw, minimum width=1in, minimum height=1in, very thick, fill=black!20] 
+{{\Huge{{{1}}}}}; \node[draw=none, fill=red!30, align=left, 
+anchor=south west] at (-0.5in,-0.5in) {{\small{{{0}}}}};
+\node[draw, minimum width=1in, minimum height=1in, very thick,
+anchor=center] at (0, 0) {{}};
 \end{{tikzpicture}}'''
 
 
 if __name__ == '__main__':
     main()
+
