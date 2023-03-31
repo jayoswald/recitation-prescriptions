@@ -20,12 +20,11 @@ def main():
 
 def build_prescriptions(evaluation_path, concepts, quiz_name):
     evaluations = assignment_evaluations(evaluation_path)
-    all_students = evaluations.students.keys()
     prescriptions = []
-    for sid, student in evaluations.students.items():
-        p = prescription(concepts, quiz_name, student.full_name(), sid)
-        if sid in evaluations.students:
-            p.set_required_concepts(evaluations.students[sid])
+
+    for student in evaluations.students:
+        p = prescription(concepts, quiz_name, student.full_name(), student.sid)
+        p.set_required_concepts(student)
         prescriptions.append(p)
     short_name = quiz_name.replace(' ', '')
     write_prescriptions('prescriptions-' + short_name, prescriptions)
@@ -49,7 +48,7 @@ class student:
 class assignment_evaluations:
     ''' Class that reads Gradescope assignment evaluation csv file. '''
     def __init__(self, path):
-        self.students = {}
+        self.students = []
         self.read_csv(path)
 
     def read_csv(self, path):
@@ -65,16 +64,17 @@ class assignment_evaluations:
         i = header.index('Submission Time') + 1
         j = header.index('Adjustment')
         for row in reader:
-            if not row or row[0] in 'Point Values Rubric Numbers Rubric Type':
+            if not row or row[0] in 'Point Values Rubric Numbers Rubric Type Scoring Method':
                 continue
             try:
                 s = student(row[header.index('First Name')],
                             row[header.index('Last Name')],
                             row[header.index('SID')])
                 s.missed_concepts = [row[i].lower() == 'true' for i in concept_indices]
-                self.students[s.sid] = s
+                self.students.append(s)
             except:
                 print('Skipping invalid row\n', row)
+        self.students.sort(key=lambda s: s.name[-1])
 
 
 class prescription:
