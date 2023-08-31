@@ -2,17 +2,18 @@
 import argparse
 import tempfile
 import os
+import re
 import csv
 import subprocess
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-c', nargs='+', action='append', dest='concepts',
+    parser.add_argument('--concept', '-c', nargs='+', action='append', dest='concepts',
                         help='rubric item numbers to use.')
-    parser.add_argument('--evaluations', required=True,
+    parser.add_argument('--evaluations', '-e', required=True,
                         help='Gradescope quiz evaluations csv file')
-    parser.add_argument('--quiz', required=True, 
+    parser.add_argument('--quiz', '-q', required=True, 
                         help='name of assignment, e.g. "Quiz 1"')
     args = parser.parse_args()
     build_prescriptions(args.evaluations, args.concepts, args.quiz)
@@ -23,9 +24,10 @@ def build_prescriptions(evaluation_path, concepts, quiz_name):
     prescriptions = []
 
     for student in evaluations.students:
-        p = prescription(concepts, quiz_name, student.full_name(), student.sid)
-        p.set_required_concepts(student)
-        prescriptions.append(p)
+        if len(student.missed_concepts) > 0:
+            p = prescription(concepts, quiz_name, student.full_name(), student.sid)
+            p.set_required_concepts(student)
+            prescriptions.append(p)
     short_name = quiz_name.replace(' ', '')
     write_prescriptions('prescriptions-' + short_name, prescriptions)
     # Writes a blank prescription for the Gradescope template.
@@ -38,7 +40,7 @@ class student:
     def __init__(self, first, last, sid):
         self.name = (first, last)
         self.sid = sid
-        self.missed_concepts = []
+        self.missed_concepts = set()
 
     def full_name(self):
         ''' Returns student full name as "First Last" '''
@@ -59,10 +61,14 @@ class assignment_evaluations:
             print(f'Could not open evaluation file: {path}')
             return None
         header = next(reader)
+        concept_pattern = re.compile('[Cc]oncept (\d+): (.*): (.*)')
         # Concept rubric titles must begin with 'concept ' (case insensitive).
-        concept_indices = [i for i,h in enumerate(header) if h.lower().startswith('concept ')]
-        i = header.index('Submission Time') + 1
-        j = header.index('Adjustment')
+        concept_keys = {}
+        for s in header:
+            m = concept_pattern.match(s)
+            if m:
+                concept_keys[m.group(1)] = m.group(2)
+
         for row in reader:
             if not row or row[0] in 'Point Values Rubric Numbers Rubric Type Scoring Method':
                 continue
@@ -70,7 +76,12 @@ class assignment_evaluations:
                 s = student(row[header.index('First Name')],
                             row[header.index('Last Name')],
                             row[header.index('SID')])
-                s.missed_concepts = [row[i].lower() == 'true' for i in concept_indices]
+                for i, cell in enumerate(row):
+                    if cell.lower() == 'true':
+                        m = concept_pattern.match(header[i])
+                        if m:
+                            key = m.group(1)
+                            s.missed_concepts.add(key)
                 self.students.append(s)
             except:
                 print('Skipping invalid row\n', row)
@@ -82,12 +93,13 @@ class prescription:
         self.quiz_name = quiz_name
         self.student_name = name
         self.student_id = sid
-        self.concepts = [prescription.concept(c[1:]) for c in concepts]
+        self.concepts = {c[0]: prescription.concept(c[1:]) for c in concepts}
 
-    def set_required_concepts(self, evaluation):
-        for c, s in zip(self.concepts, evaluation.missed_concepts):
-            if not s:
-                for p in c.problems:
+    def set_required_concepts(self, student_evaluation):
+        # Ignores value from each missed concepts as it will always be True
+        for c in self.concepts:
+            if c not in student_evaluation.missed_concepts:
+                for p in self.concepts[c].problems:
                     p.status = 'X'
 
     class concept:
@@ -115,8 +127,8 @@ def write_prescriptions(basename, prescriptions):
             name, sid = r'\quad', r'\quad'
 
         fid.write(page_header.format(name, s.quiz_name + ' prescriptions', sid))
-        for i,c in enumerate(s.concepts):
-            fid.write(concept_label.format(i+1))
+        for i,c in s.concepts.items():
+            fid.write(concept_label.format(i))
             for p in c.problems:
                 if p.status == 'X':
                     fid.write(shaded_box.format(p.name, p.status))
