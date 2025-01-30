@@ -61,13 +61,14 @@ class assignment_evaluations:
             print(f'Could not open evaluation file: {path}')
             return None
         header = next(reader)
-        concept_pattern = re.compile('[Cc]oncept (\d+): (.*): (.*)')
+        concept_pattern = re.compile('[Cc]oncept (\d+)\s*: (.*): (.*)')
         # Concept rubric titles must begin with 'concept ' (case insensitive).
         concept_keys = {}
         for s in header:
             m = concept_pattern.match(s)
             if m:
                 concept_keys[m.group(1)] = m.group(2)
+        print(f'Found {len(concept_keys)} concepts in {path}')
 
         for row in reader:
             if not row or row[0] in 'Point Values Rubric Numbers Rubric Type Scoring Method':
