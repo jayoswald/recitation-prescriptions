@@ -5,6 +5,7 @@ import os
 import re
 import csv
 import subprocess
+import shutil
 
 
 def main():
@@ -139,7 +140,7 @@ def write_prescriptions(basename, prescriptions):
     fid.write('\end{document}')
     fid.flush()
     subprocess.call(['pdflatex', '-halt-on-error', basename], stdout=subprocess.DEVNULL)
-    os.replace(basename + '.pdf', os.path.join(cwd, basename + '.pdf'))
+    shutil.copy(basename + '.pdf', os.path.join(cwd, basename + '.pdf'))
     os.chdir(cwd)
 
 
